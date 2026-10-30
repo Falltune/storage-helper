@@ -113,7 +113,8 @@ storage-helper/
 ├─ data/                   # 运行时数据库（不提交到版本库）
 ├─ run.cmd
 ├─ run.ps1
-└─ README.md
+├─ README.md
+└─ LICENSE                 # MIT 许可证
 ```
 
 运行时自动创建 `data/` 目录和 SQLite 数据库。数据库启用了 WAL 模式；如果在服务运行期间备份，建议使用 SQLite 的在线备份能力；最稳妥的方式是停止服务后复制 `data/archive.db` 文件。
@@ -161,3 +162,7 @@ python -m unittest discover -s tests -v
 - 没有外部 CDN、字体或跟踪脚本。
 - 所有写操作使用 JSON，并由后端再次校验；SQL 均使用参数化查询。
 - 这是一个本地个人应用，没有账号体系。若通过 `--host 0.0.0.0` 暴露到局域网，请自行确保网络环境可信。
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源，可自由使用、修改与分发。

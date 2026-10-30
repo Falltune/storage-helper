@@ -301,7 +301,12 @@ class ArchiveHandler(BaseHTTPRequestHandler):
                     item = self.db.update_item(parts[2], self._read_json())
                     self._send_json(200, {"item": item})
                     return
-                self._method_not_allowed({"GET", "PATCH"})
+                if method == "DELETE":
+                    self._read_json_optional()
+                    deleted = self.db.delete_item(parts[2])
+                    self._send_json(200, {"deleted": deleted})
+                    return
+                self._method_not_allowed({"GET", "PATCH", "DELETE"})
                 return
             if len(parts) == 4 and parts[3] in {"archive", "unarchive", "restore"}:
                 self._require_method(method, {"POST"})

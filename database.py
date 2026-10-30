@@ -107,6 +107,25 @@ def normalize_item_id(value: Any) -> str:
     return item_id
 
 
+def normalize_requested_item_id(value: Any) -> tuple[str, int]:
+    """Validate an item id explicitly chosen by the user, e.g. a visited URL."""
+    item_id = str(value or "").strip().upper()
+    if not ITEM_ID_RE.fullmatch(item_id) or item_id[:3] == "STR":
+        raise AppError(
+            "物品编号格式不正确",
+            code="invalid_item_id",
+            fields={"item_id": "应为 3 位分类代号加 6 位数字，例如 ELE000042"},
+        )
+    serial = int(item_id[3:])
+    if serial < 1:
+        raise AppError(
+            "物品编号的序号必须从 000001 开始",
+            code="invalid_item_id",
+            fields={"item_id": "序号至少为 000001"},
+        )
+    return item_id, serial
+
+
 def normalize_warehouse_id(value: Any) -> str:
     warehouse_id = str(value or "").strip().upper()
     if not WAREHOUSE_ID_RE.fullmatch(warehouse_id):
@@ -116,6 +135,25 @@ def normalize_warehouse_id(value: Any) -> str:
             code="warehouse_not_found",
         )
     return warehouse_id
+
+
+def normalize_requested_warehouse_id(value: Any) -> tuple[str, int]:
+    """Validate a warehouse id explicitly chosen by the user, e.g. a visited URL."""
+    warehouse_id = str(value or "").strip().upper()
+    if not WAREHOUSE_ID_RE.fullmatch(warehouse_id):
+        raise AppError(
+            "仓库编号格式不正确",
+            code="invalid_warehouse_id",
+            fields={"warehouse_id": "应为 STR + 6 位数字，例如 STR000042"},
+        )
+    serial = int(warehouse_id[3:])
+    if serial < 1:
+        raise AppError(
+            "仓库编号的序号必须从 000001 开始",
+            code="invalid_warehouse_id",
+            fields={"warehouse_id": "序号至少为 000001"},
+        )
+    return warehouse_id, serial
 
 
 def parse_price_cents(value: Any) -> int:
@@ -219,6 +257,49 @@ class Database:
         finally:
             conn.close()
 
+    @staticmethod
+    def _next_released_serial(
+        conn: sqlite3.Connection, kind: str, scope: str = ""
+    ) -> int | None:
+        """Return the smallest number freed by a deletion, if any."""
+        row = conn.execute(
+            """
+            SELECT MIN(serial) AS serial
+            FROM released_numbers
+            WHERE kind = ? AND scope = ?
+            """,
+            (kind, scope),
+        ).fetchone()
+        if row is None or row["serial"] is None:
+            return None
+        return int(row["serial"])
+
+    @staticmethod
+    def _claim_released_serial(
+        conn: sqlite3.Connection, kind: str, scope: str, serial: int
+    ) -> None:
+        """Mark a freed number as used again so it is never assigned twice."""
+        conn.execute(
+            "DELETE FROM released_numbers WHERE kind = ? AND scope = ? AND serial = ?",
+            (kind, scope, serial),
+        )
+
+    @staticmethod
+    def _release_serial(
+        conn: sqlite3.Connection,
+        kind: str,
+        scope: str,
+        serial: int,
+        released_at: str,
+    ) -> None:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO released_numbers(kind, scope, serial, released_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (kind, scope, serial, released_at),
+        )
+
     def _initialize(self) -> None:
         schema = f"""
         CREATE TABLE IF NOT EXISTS app_meta (
@@ -250,6 +331,14 @@ class Database:
             occurred_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS released_numbers (
+            kind TEXT NOT NULL CHECK(kind IN ('item', 'warehouse')),
+            scope TEXT NOT NULL DEFAULT '',
+            serial INTEGER NOT NULL CHECK(serial BETWEEN 1 AND 999999),
+            released_at TEXT NOT NULL,
+            PRIMARY KEY (kind, scope, serial)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_items_warehouse ON items(warehouse_id);
         CREATE INDEX IF NOT EXISTS idx_items_status ON items(status);
         CREATE INDEX IF NOT EXISTS idx_movements_item ON movements(item_id, occurred_at);
@@ -276,8 +365,8 @@ class Database:
                 ("schema_version", "1"),
             )
             conn.execute(
-                "UPDATE app_meta SET value = '3' "
-                "WHERE key = 'schema_version' AND value <> '3'"
+                "UPDATE app_meta SET value = '4' "
+                "WHERE key = 'schema_version' AND value <> '4'"
             )
             conn.commit()
         finally:
@@ -379,7 +468,12 @@ class Database:
 
     @staticmethod
     def _category_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        next_serial = row["next_serial"]
+        released_serial = row["released_serial"]
+        next_serial = (
+            int(released_serial)
+            if released_serial is not None
+            else int(row["next_serial"])
+        )
         return {
             "code": row["code"],
             "name": row["name"],
@@ -493,7 +587,11 @@ class Database:
                              THEN 1 ELSE 0 END
                     ), 0) AS in_stock_count,
                     COALESCE(SUM(CASE WHEN i.archived_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-                        AS archived_item_count
+                        AS archived_item_count,
+                    (
+                        SELECT MIN(r.serial) FROM released_numbers r
+                        WHERE r.kind = 'item' AND r.scope = c.code
+                    ) AS released_serial
                 FROM categories c
                 LEFT JOIN items i ON i.category_code = c.code
                 GROUP BY c.code
@@ -687,10 +785,20 @@ class Database:
                     code="category_exists",
                     fields={"code": "该分类代号已被使用"},
                 ) from exc
+            # A recreated category starts from a clean slate: numbers freed by
+            # items of an earlier category with the same code are not reused.
+            conn.execute(
+                "DELETE FROM released_numbers WHERE kind = 'item' AND scope = ?",
+                (code,),
+            )
             row = conn.execute(
                 """
                 SELECT c.*, 0 AS item_count, 0 AS in_stock_count,
-                       0 AS archived_item_count
+                       0 AS archived_item_count,
+                       (
+                           SELECT MIN(r.serial) FROM released_numbers r
+                           WHERE r.kind = 'item' AND r.scope = c.code
+                       ) AS released_serial
                 FROM categories c WHERE c.code = ?
                 """,
                 (code,),
@@ -719,6 +827,10 @@ class Database:
                     status=409,
                     code="category_not_empty",
                 )
+            conn.execute(
+                "DELETE FROM released_numbers WHERE kind = 'item' AND scope = ?",
+                (normalized,),
+            )
             conn.execute("DELETE FROM categories WHERE code = ?", (normalized,))
             return {"code": normalized}
 
@@ -729,23 +841,64 @@ class Database:
             required=False,
             max_len=40,
         )
+        raw_warehouse_id = payload.get("warehouse_id")
+        explicit_id: str | None = None
+        explicit_serial: int | None = None
+        if raw_warehouse_id not in (None, ""):
+            explicit_id, explicit_serial = normalize_requested_warehouse_id(
+                raw_warehouse_id
+            )
         created_at = utc_now()
         with self._transaction() as conn:
             row = conn.execute(
                 "SELECT value FROM app_meta WHERE key = 'warehouse_next_serial'"
             ).fetchone()
             next_serial = int(row["value"]) if row else 1
-            if next_serial > MAX_SERIAL:
-                raise AppError(
-                    "仓库编号已用尽",
-                    status=409,
-                    code="warehouse_sequence_exhausted",
+
+            if explicit_id is not None and explicit_serial is not None:
+                # The user visited a warehouse address that did not exist yet;
+                # reuse that exact number instead of the sequential one.
+                existing = conn.execute(
+                    "SELECT 1 FROM warehouses WHERE id = ?", (explicit_id,)
+                ).fetchone()
+                if existing is not None:
+                    raise AppError(
+                        f"仓库 {explicit_id} 已存在",
+                        status=409,
+                        code="warehouse_exists",
+                        fields={"warehouse_id": "该编号已有仓库"},
+                    )
+                warehouse_id = explicit_id
+                if explicit_serial >= next_serial:
+                    next_serial = explicit_serial + 1
+                    conn.execute(
+                        "UPDATE app_meta SET value = ? "
+                        "WHERE key = 'warehouse_next_serial'",
+                        (str(next_serial),),
+                    )
+                self._claim_released_serial(
+                    conn, "warehouse", "", explicit_serial
                 )
-            warehouse_id = f"STR{next_serial:06d}"
-            conn.execute(
-                "UPDATE app_meta SET value = ? WHERE key = 'warehouse_next_serial'",
-                (str(next_serial + 1),),
-            )
+            else:
+                released_serial = self._next_released_serial(conn, "warehouse")
+                if released_serial is not None:
+                    warehouse_id = f"STR{released_serial:06d}"
+                    self._claim_released_serial(
+                        conn, "warehouse", "", released_serial
+                    )
+                else:
+                    if next_serial > MAX_SERIAL:
+                        raise AppError(
+                            "仓库编号已用尽",
+                            status=409,
+                            code="warehouse_sequence_exhausted",
+                        )
+                    warehouse_id = f"STR{next_serial:06d}"
+                    conn.execute(
+                        "UPDATE app_meta SET value = ? "
+                        "WHERE key = 'warehouse_next_serial'",
+                        (str(next_serial + 1),),
+                    )
             conn.execute(
                 "INSERT INTO warehouses(id, label, created_at) VALUES (?, ?, ?)",
                 (warehouse_id, label, created_at),
@@ -897,11 +1050,40 @@ class Database:
                     status=409,
                     code="warehouse_in_use",
                 )
+            self._release_serial(
+                conn,
+                "warehouse",
+                "",
+                int(normalized[3:]),
+                utc_now(),
+            )
             conn.execute("DELETE FROM warehouses WHERE id = ?", (normalized,))
-            return {"id": normalized, "label": row["label"] or ""}
+            return {
+                "id": normalized,
+                "label": row["label"] or "",
+                "released": True,
+            }
 
     def create_item(self, payload: dict[str, Any]) -> dict[str, Any]:
-        code = normalize_category_code(payload.get("category_code") or payload.get("category"))
+        raw_item_id = payload.get("item_id")
+        explicit_id: str | None = None
+        explicit_serial: int | None = None
+        if raw_item_id not in (None, ""):
+            explicit_id, explicit_serial = normalize_requested_item_id(raw_item_id)
+            code = explicit_id[:3]
+            raw_category = payload.get("category_code") or payload.get("category")
+            if raw_category not in (None, "") and normalize_category_code(
+                raw_category
+            ) != code:
+                raise AppError(
+                    "物品编号与分类不一致",
+                    code="item_id_category_mismatch",
+                    fields={"item_id": f"编号 {explicit_id} 属于分类 {code}"},
+                )
+        else:
+            code = normalize_category_code(
+                payload.get("category_code") or payload.get("category")
+            )
         name = _clean_text(payload.get("name"), "物品名称", required=True, max_len=100)
         acquired_on = parse_acquired_on(payload.get("acquired_on"))
         price_cents = parse_price_cents(payload.get("price"))
@@ -936,18 +1118,49 @@ class Database:
                     code="warehouse_archived",
                     fields={"warehouse_id": "仓库已归档"},
                 )
-            serial = int(category["next_serial"])
-            if serial > MAX_SERIAL:
-                raise AppError(
-                    f"分类 {code} 的编号已用尽",
-                    status=409,
-                    code="item_sequence_exhausted",
-                )
-            item_id = f"{code}{serial:06d}"
-            conn.execute(
-                "UPDATE categories SET next_serial = ? WHERE code = ?",
-                (serial + 1, code),
-            )
+            if explicit_id is not None and explicit_serial is not None:
+                # Reuse the number the user visited instead of allocating the
+                # next one; leave the counter past it so later automatic ids
+                # never collide with it.
+                existing = conn.execute(
+                    "SELECT 1 FROM items WHERE id = ?", (explicit_id,)
+                ).fetchone()
+                if existing is not None:
+                    raise AppError(
+                        f"物品 {explicit_id} 已存在",
+                        status=409,
+                        code="item_exists",
+                        fields={"item_id": "该编号已有档案"},
+                    )
+                item_id = explicit_id
+                serial = explicit_serial
+                if serial >= int(category["next_serial"]):
+                    conn.execute(
+                        "UPDATE categories SET next_serial = ? WHERE code = ?",
+                        (serial + 1, code),
+                    )
+                self._claim_released_serial(conn, "item", code, serial)
+            else:
+                # Prefer a number freed by an earlier deletion, then continue
+                # after the highest number ever handed out.
+                released_serial = self._next_released_serial(conn, "item", code)
+                if released_serial is not None:
+                    serial = released_serial
+                    item_id = f"{code}{serial:06d}"
+                    self._claim_released_serial(conn, "item", code, serial)
+                else:
+                    serial = int(category["next_serial"])
+                    if serial > MAX_SERIAL:
+                        raise AppError(
+                            f"分类 {code} 的编号已用尽",
+                            status=409,
+                            code="item_sequence_exhausted",
+                        )
+                    item_id = f"{code}{serial:06d}"
+                    conn.execute(
+                        "UPDATE categories SET next_serial = ? WHERE code = ?",
+                        (serial + 1, code),
+                    )
             conn.execute(
                 """
                 INSERT INTO items(
@@ -975,6 +1188,34 @@ class Database:
                 (item_id, warehouse_id, now),
             )
             return self._get_item_with_conn(conn, item_id)
+
+    def delete_item(self, item_id: Any) -> dict[str, Any]:
+        normalized = normalize_item_id(item_id)
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT id, category_code, serial, name FROM items WHERE id = ?",
+                (normalized,),
+            ).fetchone()
+            if row is None:
+                raise AppError("物品不存在", status=404, code="item_not_found")
+            # The movement history belongs to this item; dropping it also keeps
+            # the warehouse's history_count honest after the item is gone.
+            conn.execute("DELETE FROM movements WHERE item_id = ?", (normalized,))
+            conn.execute("DELETE FROM items WHERE id = ?", (normalized,))
+            self._release_serial(
+                conn,
+                "item",
+                row["category_code"],
+                int(row["serial"]),
+                utc_now(),
+            )
+            return {
+                "id": normalized,
+                "name": row["name"],
+                "category_code": row["category_code"],
+                "serial": row["serial"],
+                "released": True,
+            }
 
     def update_item(self, item_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_item_id(item_id)

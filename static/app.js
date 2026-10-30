@@ -454,9 +454,12 @@
 
   function renderRecordNotFound(active, kind, recordId) {
     const isWarehouse = kind === "warehouse";
+    const recordKey = String(recordId || "");
     const categoryCode = isWarehouse
       ? ""
-      : String(recordId || "").slice(0, 3).toUpperCase();
+      : recordKey.slice(0, 3).toUpperCase();
+    const canReuseRecordId =
+      /^[A-Z]{3}\d{6}$/.test(recordKey) && Number(recordKey.slice(3)) >= 1;
     renderShell(
       active,
       '<section class="state-page">' +
@@ -468,13 +471,21 @@
         (isWarehouse ? "没有找到这个仓库" : "没有找到这件物品") +
         "</h1>" +
         '<p class="state-copy">编号 <span class="mono">' +
-        h(recordId || "") +
+        h(recordKey) +
         "</span> 不在现有档案中。" +
         (isWarehouse
-          ? "这个编号还没有分配。你可以新建一个仓库，系统会自动分配可用编号。"
-          : "请检查链接，也可以直接补录一件物品；若分类 " +
-            h(categoryCode) +
-            " 尚未建立，会先引导你创建分类。") +
+          ? canReuseRecordId
+            ? "这个编号还没有分配。新建仓库时会沿用编号 " +
+              h(recordKey) +
+              "，而不是顺延分配下一个编号。"
+            : "这个编号不是有效的仓库编号：序号从 000001 开始。新建仓库时由系统分配可用编号。"
+          : canReuseRecordId
+            ? "补录这件物品时会沿用编号 " +
+              h(recordKey) +
+              "；若分类 " +
+              h(categoryCode) +
+              " 尚未建立，会先引导你创建分类。"
+            : "这个编号不是有效的物品编号：序号从 000001 开始。你可以直接添加一件新物品，由系统分配编号。") +
         "</p>" +
         '<div class="state-actions">' +
         (isWarehouse
@@ -494,14 +505,20 @@
       const createButton = document.getElementById("create-missing-warehouse");
       if (createButton) {
         createButton.addEventListener("click", function () {
-          openWarehouseCreateModal();
+          openWarehouseCreateModal(
+            canReuseRecordId ? { warehouseId: recordKey } : {}
+          );
         });
       }
     } else {
       const addButton = document.getElementById("add-missing-item");
       if (addButton) {
         addButton.addEventListener("click", function () {
-          openItemCreateModal({ categoryCode: categoryCode });
+          openItemCreateModal(
+            canReuseRecordId
+              ? { categoryCode: categoryCode, itemId: recordKey }
+              : { categoryCode: categoryCode }
+          );
         });
       }
     }
@@ -1361,7 +1378,7 @@
       "</section>" +
       '<div class="info-strip"><span class="info-strip-icon">' +
       icon("info") +
-      "</span><p>仓库以名称为主，编号由 <strong>STR + 六位序号</strong> 自动生成。从未有物品进入的仓库可以删除，用过的仓库可以归档保留记录。</p></div>" +
+      "</span><p>仓库以名称为主，编号由 <strong>STR + 六位序号</strong> 自动生成。从未有物品进入的仓库可以删除，删除后编号会被释放并可再次使用；用过的仓库可以归档保留记录。</p></div>" +
       activeContent +
       archivedContent +
       "</div>";
@@ -1415,7 +1432,7 @@
       "</h2><p>" +
       meta +
       "</p></div>" +
-      '<div class="category-next"><span>下一个编号</span><strong class="mono">' +
+      '<div class="category-next"><span>下一个可用编号</span><strong class="mono">' +
       (category.next_id ? h(category.next_id) : "编号已用尽") +
       "</strong></div>" +
       '<div class="category-actions">' +
@@ -1589,6 +1606,9 @@
         icon("edit") +
         "编辑资料</button>" +
         archiveAction +
+        '<button class="button button-secondary archive-delete-button" type="button" id="delete-item">' +
+        icon("trash") +
+        "删除物品</button>" +
         "</div></div>" +
         '<section class="item-record-hero">' +
         '<div class="item-record-main">' +
@@ -1688,6 +1708,12 @@
     if (editButton) editButton.addEventListener("click", function () {
       openItemEditModal(item);
     });
+    const deleteButton = document.getElementById("delete-item");
+    if (deleteButton) {
+      deleteButton.addEventListener("click", function () {
+        openItemDeleteModal(item);
+      });
+    }
     const archiveButton = document.getElementById("archive-item");
     if (archiveButton) {
       archiveButton.addEventListener("click", function () {
@@ -1856,7 +1882,7 @@
         : "") +
       '<p class="warehouse-since">建立于 ' +
       formatDateTime(warehouse.created_at).slice(0, 10) +
-      " · 编号由系统分配，不可更改</p>" +
+      " · 编号是仓库地址，删除仓库后会被释放</p>" +
       "</div>" +
       '<div class="warehouse-summary">' +
       '<div><span>在库物品</span><strong>' +
@@ -1973,7 +1999,7 @@
         h(warehouseTitle(warehouse)) +
         " · " +
         h(warehouse.id) +
-        "</strong><p>这个仓库还没有任何物品进入过，可以安全删除。删除后编号不会重新分配，操作无法撤销。</p></div></div>" +
+        "</strong><p>这个仓库还没有任何物品进入过，可以安全删除。删除后编号会被释放，之后新建仓库时可能再次使用；操作无法撤销。</p></div></div>" +
         formActions({
           submitLabel: "删除仓库",
           submitIcon: "trash",
@@ -2234,11 +2260,20 @@
 
   function openWarehouseCreateModal(options) {
     const opts = options || {};
+    const requestedWarehouseId = (function () {
+      const candidate = String(opts.warehouseId || "").trim().toUpperCase();
+      const match = /^STR(\d{6})$/.exec(candidate);
+      return match && Number(match[1]) >= 1 ? candidate : "";
+    })();
     const labelField = "warehouse-label";
     const modal = openModal({
       eyebrow: "NEW WAREHOUSE",
       title: "新建仓库",
-      description: "先给仓库起一个名字，编号由系统自动分配。",
+      description: requestedWarehouseId
+        ? "沿用访问的编号 " +
+          requestedWarehouseId +
+          "，给它起个名字即可建立仓库。"
+        : "先给仓库起一个名字，编号由系统自动分配。",
       size: "sm",
       initialFocus: "#" + labelField,
       body:
@@ -2249,16 +2284,22 @@
         labelField +
         '" class="input" type="text" name="label" maxlength="40" placeholder="例如：书房 / 主仓库 / 父母家" autofocus>' +
         '<span class="field-hint">名称是这个仓库的称呼；留空时，会以编号来称呼它。</span></label>' +
-        '<div class="field-readonly"><span>将自动分配编号</span><strong class="mono">STR —— ——</strong></div>' +
+        '<div class="field-readonly"><span>' +
+        (requestedWarehouseId ? "将沿用访问的编号" : "将自动分配编号") +
+        '</span><strong class="mono">' +
+        (requestedWarehouseId ? h(requestedWarehouseId) : "STR —— ——") +
+        "</strong></div>" +
         formActions({ submitLabel: "建立仓库", submitIcon: "plus" }) +
         "</form>",
     });
     const form = modal.dialog.querySelector("form");
     bindForm(form, async function () {
       const formData = new FormData(form);
+      const payload = { label: String(formData.get("label") || "") };
+      if (requestedWarehouseId) payload.warehouse_id = requestedWarehouseId;
       const data = await api("/api/warehouses", {
         method: "POST",
-        body: { label: String(formData.get("label") || "") },
+        body: payload,
       });
       modal.close();
       toast("仓库 " + warehouseTitle(data.warehouse) + " 已建立", "success");
@@ -2428,7 +2469,15 @@
 
   async function openItemCreateModal(options) {
     const opts = options || {};
-    const requiredCode = String(opts.categoryCode || "").trim().toUpperCase();
+    const requestedItemId = (function () {
+      const candidate = String(opts.itemId || "").trim().toUpperCase();
+      return /^[A-Z]{3}\d{6}$/.test(candidate) && candidate.slice(0, 3) !== "STR"
+        ? candidate
+        : "";
+    })();
+    const inheritedCode = requestedItemId ? requestedItemId.slice(0, 3) : "";
+    const requiredCode =
+      inheritedCode || String(opts.categoryCode || "").trim().toUpperCase();
     const hasRequiredCode = /^[A-Z]{3}$/.test(requiredCode);
     let categories = [];
     let warehouses = [];
@@ -2442,6 +2491,12 @@
     } catch (error) {
       toast(error.message || "未能读取分类与仓库信息", "error");
       return;
+    }
+
+    function inheritedCategories() {
+      return categories.filter(function (category) {
+        return category.code === inheritedCode;
+      });
     }
 
     const categorySelectId = uid("item-create-category");
@@ -2522,7 +2577,10 @@
       '<select id="' +
       categorySelectId +
       '" class="input select-input" name="category_code" required>' +
-      categoryOptionMarkup(categories, "") +
+      categoryOptionMarkup(
+        inheritedCode ? inheritedCategories() : categories,
+        inheritedCode
+      ) +
       "</select></div>" +
       '<div class="field"><div class="field-label-row">' +
       '<label class="field-label" for="' +
@@ -2551,9 +2609,13 @@
       '" required></div></label>' +
       priceFieldMarkup() +
       "</div>" +
-      '<div class="number-preview"><span>系统将分配编号</span><strong class="mono" id="' +
+      '<div class="number-preview"><span>' +
+      (requestedItemId ? "将沿用访问的编号" : "系统将分配编号") +
+      '</span><strong class="mono" id="' +
       previewId +
-      '">选择分类后预览</strong></div>' +
+      '">' +
+      (requestedItemId ? h(requestedItemId) : "选择分类后预览") +
+      "</strong></div>" +
       '<div class="modal-actions"><button class="button button-quiet" type="button" data-modal-close>取消</button>' +
       '<button class="button button-primary" type="submit">' +
       icon("plus") +
@@ -2565,12 +2627,18 @@
       focusSelector = "#" + alertsId + " [data-create-category]";
     } else if (!warehouses.length) {
       focusSelector = "#" + alertsId + " [data-create-warehouse]";
+    } else if (requestedItemId) {
+      focusSelector = "#" + nameId;
     }
 
     const modal = openModal({
       eyebrow: "NEW ITEM",
       title: "添加物品",
-      description: "选择分类与存放仓库，系统会分配新的物品编号并直接入库。",
+      description: requestedItemId
+        ? "沿用地址中的编号 " +
+          requestedItemId +
+          "，选择存放仓库并补齐资料，即可补录这件物品。"
+        : "选择分类与存放仓库，系统会分配新的物品编号并直接入库。",
       size: "lg",
       initialFocus: focusSelector,
       body: body,
@@ -2586,6 +2654,10 @@
 
     function updatePreview() {
       if (!preview) return;
+      if (requestedItemId) {
+        preview.textContent = requestedItemId;
+        return;
+      }
       const selected = categories.find(function (category) {
         return category.code === (categorySelect ? categorySelect.value : "");
       });
@@ -2613,6 +2685,12 @@
           '<option value="" disabled selected>分类 ' +
           h(requiredCode) +
           " 尚未建立</option>";
+        categorySelect.disabled = true;
+      } else if (requestedItemId) {
+        categorySelect.innerHTML = categoryOptionMarkup(
+          inheritedCategories(),
+          inheritedCode
+        );
         categorySelect.disabled = true;
       } else if (!categories.length) {
         categorySelect.innerHTML = categoryOptionMarkup(categories, "");
@@ -2674,7 +2752,12 @@
           return;
         }
       }
-      if (categorySelect && !categorySelect.disabled) categorySelect.focus();
+      if (categorySelect && !categorySelect.disabled) {
+        categorySelect.focus();
+      } else if (requestedItemId) {
+        const nameInput = modal.dialog.querySelector("#" + nameId);
+        if (nameInput) nameInput.focus();
+      }
     }
 
     updateCategorySelect("");
@@ -2735,15 +2818,19 @@
         throw new ApiError("请先新建一个仓库，再添加物品。");
       }
       const formData = new FormData(form);
+      const payload = {
+        category_code: requestedItemId
+          ? inheritedCode
+          : String(formData.get("category_code") || ""),
+        name: String(formData.get("name") || ""),
+        acquired_on: String(formData.get("acquired_on") || ""),
+        price: String(formData.get("price") || ""),
+        warehouse_id: String(formData.get("warehouse_id") || ""),
+      };
+      if (requestedItemId) payload.item_id = requestedItemId;
       const data = await api("/api/items", {
         method: "POST",
-        body: {
-          category_code: String(formData.get("category_code") || ""),
-          name: String(formData.get("name") || ""),
-          acquired_on: String(formData.get("acquired_on") || ""),
-          price: String(formData.get("price") || ""),
-          warehouse_id: String(formData.get("warehouse_id") || ""),
-        },
+        body: payload,
       });
       modal.close();
       toast(data.item.id + " 已添加", "success");
@@ -3208,6 +3295,47 @@
       modal.close();
       toast(data.item.id + " 的资料已更新", "success");
       refreshCurrentPage({ scroll: false });
+    });
+  }
+
+  function openItemDeleteModal(item) {
+    const inStock = item.status === "in_stock";
+    const archived = Boolean(item.archived);
+    const modal = openModal({
+      eyebrow: "DELETE ITEM",
+      title: "删除物品 " + item.name,
+      description: "删除后档案与流转记录都会消失，物品编号会被释放。",
+      size: "sm",
+      initialFocus: null,
+      body:
+        '<form class="modal-form" novalidate>' +
+        formErrorMarkup() +
+        '<div class="callout callout-attention">' +
+        icon("alert") +
+        '<div><strong class="mono">' +
+        h(item.id) +
+        " · " +
+        h(item.name) +
+        "</strong><p>删除会同时移除这件物品的全部流转记录" +
+        (inStock && !archived ? "，并把它从当前仓库中移出" : "") +
+        "。编号 " +
+        h(item.id) +
+        " 会被释放，之后新建物品时可能再次使用。操作无法撤销。</p></div></div>" +
+        formActions({
+          submitLabel: "删除物品",
+          submitIcon: "trash",
+          danger: true,
+        }) +
+        "</form>",
+    });
+    const form = modal.dialog.querySelector("form");
+    bindForm(form, async function () {
+      await api("/api/items/" + encodeURIComponent(item.id), {
+        method: "DELETE",
+      });
+      modal.close();
+      toast(item.id + " 已删除，编号已释放", "success");
+      navigate("/items");
     });
   }
 

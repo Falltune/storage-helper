@@ -419,6 +419,295 @@ class ArchiveHttpTest(unittest.TestCase):
         status, _, _ = self.http("POST", "/api/categories", raw=b"[]")
         self.assertEqual(status, 422)
 
+    def test_create_item_reuses_visited_id(self) -> None:
+        self.assertEqual(self.create_category("ELE", "电子设备")[0], 201)
+        self.assertEqual(self.create_category("BOO", "图书")[0], 201)
+        warehouse_id = self.create_warehouse("书房")[1]["warehouse"]["id"]
+
+        def item_payload(**overrides) -> dict:
+            payload = {
+                "name": "补录物品",
+                "acquired_on": "2026-01-15",
+                "price": "42.00",
+                "warehouse_id": warehouse_id,
+            }
+            payload.update(overrides)
+            return payload
+
+        # A missing record visited at /ele000042 is created with that same id.
+        status, created = self.api_json(
+            "POST",
+            "/api/items",
+            item_payload(item_id="ele000042", category_code="ele"),
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["item"]["id"], "ELE000042")
+        self.assertEqual(created["item"]["category_code"], "ELE")
+        self.assertEqual(created["item"]["status"], "in_stock")
+        self.assertEqual(created["item"]["warehouse"]["id"], warehouse_id)
+        self.assertEqual(created["item"]["movements"][0]["type"], "inbound")
+
+        status, fetched = self.api_json("GET", "/api/items/ELE000042")
+        self.assertEqual(status, 200)
+        self.assertEqual(fetched["item"]["id"], "ELE000042")
+
+        status, categories = self.api_json("GET", "/api/categories")
+        self.assertEqual(status, 200)
+        by_code = {entry["code"]: entry for entry in categories["categories"]}
+        # The category counter moves past the reused number.
+        self.assertEqual(by_code["ELE"]["next_id"], "ELE000043")
+
+        status, automatic = self.create_item("ELE", "自动编号", warehouse_id)
+        self.assertEqual(status, 201)
+        self.assertEqual(automatic["item"]["id"], "ELE000043")
+
+        # A number below the counter can still be filled in by hand, and it
+        # must not rewind the counter.
+        status, filled = self.api_json(
+            "POST", "/api/items", item_payload(item_id="ELE000001")
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(filled["item"]["id"], "ELE000001")
+        status, categories = self.api_json("GET", "/api/categories")
+        by_code = {entry["code"]: entry for entry in categories["categories"]}
+        self.assertEqual(by_code["ELE"]["next_id"], "ELE000044")
+
+        # Taking an existing number is a conflict, not a silent renumbering.
+        status, duplicate = self.api_json(
+            "POST", "/api/items", item_payload(item_id="ELE000042")
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(duplicate["error"]["code"], "item_exists")
+
+        status, mismatch = self.api_json(
+            "POST",
+            "/api/items",
+            item_payload(item_id="ELE000050", category_code="BOO"),
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(mismatch["error"]["code"], "item_id_category_mismatch")
+
+        for bad_id in ("ELE42", "STR000001", "ELE000000", "ELE-000042"):
+            with self.subTest(item_id=bad_id):
+                status, response = self.api_json(
+                    "POST", "/api/items", item_payload(item_id=bad_id)
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(response["error"]["code"], "invalid_item_id")
+
+        status, missing_category = self.api_json(
+            "POST", "/api/items", item_payload(item_id="ZZZ000001")
+        )
+        self.assertEqual(status, 404)
+        self.assertEqual(missing_category["error"]["code"], "category_not_found")
+
+        # The last number is usable; afterwards no automatic id is left.
+        status, last = self.api_json(
+            "POST", "/api/items", item_payload(item_id="ELE999999")
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(last["item"]["id"], "ELE999999")
+        status, categories = self.api_json("GET", "/api/categories")
+        by_code = {entry["code"]: entry for entry in categories["categories"]}
+        self.assertEqual(by_code["ELE"]["next_serial"], 1_000_000)
+        self.assertIsNone(by_code["ELE"]["next_id"])
+
+        status, exhausted = self.api_json(
+            "POST", "/api/items", item_payload(category_code="ELE")
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(exhausted["error"]["code"], "item_sequence_exhausted")
+
+    def test_create_warehouse_reuses_visited_id(self) -> None:
+        first = self.create_warehouse("书房")[1]["warehouse"]
+        second = self.create_warehouse("客厅")[1]["warehouse"]
+        self.assertEqual(
+            (first["id"], second["id"]), ("STR000001", "STR000002")
+        )
+
+        # Visiting /str000009 and creating from there keeps STR000009 instead
+        # of allocating the next sequential number.
+        status, created = self.api_json(
+            "POST",
+            "/api/warehouses",
+            {"warehouse_id": "str000009", "label": "阁楼"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["warehouse"]["id"], "STR000009")
+        self.assertEqual(created["warehouse"]["label"], "阁楼")
+
+        # Automatic allocation continues past the number taken from the URL.
+        status, automatic = self.create_warehouse("地下室")
+        self.assertEqual(status, 201)
+        self.assertEqual(automatic["warehouse"]["id"], "STR000010")
+
+        status, duplicate = self.api_json(
+            "POST",
+            "/api/warehouses",
+            {"warehouse_id": "STR000009", "label": "重复"},
+        )
+        self.assertEqual(status, 409)
+        self.assertEqual(duplicate["error"]["code"], "warehouse_exists")
+
+        for bad_id in ("STR42", "STR000000", "ABC000001", "STR-00001"):
+            with self.subTest(warehouse_id=bad_id):
+                status, response = self.api_json(
+                    "POST", "/api/warehouses", {"warehouse_id": bad_id}
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(response["error"]["code"], "invalid_warehouse_id")
+
+        status, listing = self.api_json("GET", "/api/warehouses")
+        self.assertEqual(
+            [entry["id"] for entry in listing["warehouses"]],
+            ["STR000001", "STR000002", "STR000009", "STR000010"],
+        )
+
+    def test_deleted_numbers_are_released(self) -> None:
+        self.assertEqual(self.create_category("ELE", "电子设备")[0], 201)
+        warehouse_id = self.create_warehouse("书房")[1]["warehouse"]["id"]
+
+        created_ids = []
+        for index in range(1, 4):
+            status, created = self.create_item(
+                "ELE", f"旧物品 {index}", warehouse_id
+            )
+            self.assertEqual(status, 201)
+            created_ids.append(created["item"]["id"])
+        self.assertEqual(
+            created_ids, ["ELE000001", "ELE000002", "ELE000003"]
+        )
+
+        # Deleting a middle item frees exactly that number, and the next
+        # automatic allocation reuses it.
+        status, deleted = self.api_json("DELETE", "/api/items/ELE000002")
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["deleted"]["id"], "ELE000002")
+        self.assertEqual(deleted["deleted"]["category_code"], "ELE")
+        self.assertEqual(deleted["deleted"]["serial"], 2)
+        self.assertTrue(deleted["deleted"]["released"])
+        self.assertEqual(
+            self.api_json("GET", "/api/items/ELE000002")[0], 404
+        )
+        status, categories = self.api_json("GET", "/api/categories")
+        self.assertEqual(categories["categories"][0]["next_id"], "ELE000002")
+
+        status, reused = self.create_item(
+            "ELE", "回收编号的新物品", warehouse_id
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(reused["item"]["id"], "ELE000002")
+
+        # A freed number also accepts an explicit re-creation from its URL.
+        self.assertEqual(
+            self.api_json("DELETE", "/api/items/ELE000003")[0], 200
+        )
+        status, restored = self.api_json(
+            "POST",
+            "/api/items",
+            {
+                "item_id": "ELE000003",
+                "name": "按地址重建",
+                "acquired_on": "2026-01-15",
+                "price": "1.00",
+                "warehouse_id": warehouse_id,
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(restored["item"]["id"], "ELE000003")
+        status, automatic = self.create_item("ELE", "下一件", warehouse_id)
+        self.assertEqual(status, 201)
+        self.assertEqual(automatic["item"]["id"], "ELE000004")
+
+        # Warehouse numbers follow the same release rules.
+        spare = self.create_warehouse("空仓库")[1]["warehouse"]
+        self.assertEqual(spare["id"], "STR000002")
+        status, deleted_warehouse = self.api_json(
+            "DELETE", f"/api/warehouses/{spare['id']}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted_warehouse["deleted"]["id"], "STR000002")
+        self.assertTrue(deleted_warehouse["deleted"]["released"])
+
+        status, revisited = self.api_json(
+            "POST",
+            "/api/warehouses",
+            {"warehouse_id": "STR000002", "label": "按地址重建"},
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(revisited["warehouse"]["id"], "STR000002")
+
+        self.assertEqual(
+            self.api_json("DELETE", "/api/warehouses/STR000002")[0], 200
+        )
+        status, recreated = self.create_warehouse("再次新建")
+        self.assertEqual(status, 201)
+        self.assertEqual(recreated["warehouse"]["id"], "STR000002")
+        status, following = self.create_warehouse("继续新建")
+        self.assertEqual(status, 201)
+        self.assertEqual(following["warehouse"]["id"], "STR000003")
+
+    def test_item_deletion_clears_history_and_category_state(self) -> None:
+        self.assertEqual(self.create_category("TMP", "临时分类")[0], 201)
+        warehouse_id = self.create_warehouse("书房")[1]["warehouse"]["id"]
+
+        status, created = self.api_json(
+            "POST",
+            "/api/items",
+            {
+                "item_id": "TMP000005",
+                "name": "编号五",
+                "acquired_on": "2026-01-15",
+                "price": "9.90",
+                "warehouse_id": warehouse_id,
+            },
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(created["item"]["id"], "TMP000005")
+
+        status, warehouse = self.api_json(
+            "GET", f"/api/warehouses/{warehouse_id}"
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(warehouse["warehouse"]["history_count"], 1)
+        self.assertFalse(warehouse["warehouse"]["can_delete"])
+
+        status, deleted = self.api_json("DELETE", "/api/items/TMP000005")
+        self.assertEqual(status, 200)
+        self.assertEqual(deleted["deleted"]["name"], "编号五")
+        self.assertEqual(
+            self.api_json("GET", "/api/items/TMP000005")[0], 404
+        )
+
+        # The deletion removes the item's movements too, so the warehouse can
+        # be deleted again and its number released.
+        status, warehouse = self.api_json(
+            "GET", f"/api/warehouses/{warehouse_id}"
+        )
+        self.assertEqual(warehouse["warehouse"]["item_count"], 0)
+        self.assertEqual(warehouse["warehouse"]["history_count"], 0)
+        self.assertTrue(warehouse["warehouse"]["can_delete"])
+
+        status, categories = self.api_json("GET", "/api/categories")
+        self.assertEqual(categories["categories"][0]["next_id"], "TMP000005")
+
+        # Deleting the category discards its released numbers; a new category
+        # with the same code starts from 000001.
+        status, _ = self.api_json("DELETE", "/api/categories/TMP")
+        self.assertEqual(status, 200)
+        status, recreated_category = self.create_category("TMP", "重新建立")
+        self.assertEqual(status, 201)
+        self.assertEqual(
+            recreated_category["category"]["next_id"], "TMP000001"
+        )
+        status, first = self.create_item("TMP", "新分类第一件", warehouse_id)
+        self.assertEqual(status, 201)
+        self.assertEqual(first["item"]["id"], "TMP000001")
+
+        status, missing = self.api_json("DELETE", "/api/items/TMP999999")
+        self.assertEqual(status, 404)
+        self.assertEqual(missing["error"]["code"], "item_not_found")
+
     def test_unknown_price_and_category_deletion(self) -> None:
         self.assertEqual(self.create_category("ELE", "电子设备")[0], 201)
         self.assertEqual(self.create_category("TMP", "空分类")[0], 201)
@@ -857,7 +1146,13 @@ class LegacyDatabaseMigrationTest(unittest.TestCase):
                     check.execute(
                         "SELECT value FROM app_meta WHERE key = 'schema_version'"
                     ).fetchone()[0],
-                    "3",
+                    "4",
+                )
+                self.assertIsNotNone(
+                    check.execute(
+                        "SELECT 1 FROM sqlite_master "
+                        "WHERE type = 'table' AND name = 'released_numbers'"
+                    ).fetchone()
                 )
                 item_columns = {
                     row[1]

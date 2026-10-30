@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f3efe6" />
+    <meta
+      name="description"
+      content="藏物 Archive —— 给每一件物品一个编号、一份档案和一个明确的位置。"
+    />
+    <title>藏物 Archive · 个人物品档案</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/static/styles.css" />
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <div class="boot-screen" role="status" aria-live="polite">
+        <span class="boot-mark">藏</span>
+        <span>正在打开档案…</span>
+      </div>
+    </div>
+    <div id="dialog-layer"></div>
+    <div id="toast-layer" class="toast-layer" aria-live="polite" aria-atomic="true"></div>
+    <noscript>
+      <div class="noscript">藏物 Archive 需要启用 JavaScript 才能使用。</div>
+    </noscript>
+  </body>
+</html>

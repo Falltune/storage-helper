@@ -3321,12 +3321,46 @@ input[type="number"]::-webkit-outer-spin-button {
 }
 
 .input-prefix .input {
+  flex: 1 1 auto;
+  min-width: 0;
   height: 100%;
   padding-left: 10px;
   background: transparent;
   border: 0;
   border-radius: 0;
   box-shadow: none;
+}
+
+.price-unknown-toggle {
+  flex: 0 0 auto;
+  align-self: stretch;
+  padding: 0 11px;
+  color: var(--rust-deep);
+  background: rgba(234, 228, 216, 0.55);
+  border-left: 1px solid var(--line);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition:
+    color 0.2s ease,
+    background 0.2s ease;
+}
+
+.price-unknown-toggle:hover {
+  background: var(--rust-soft);
+}
+
+.price-unknown-toggle:focus-visible {
+  outline-offset: -3px;
+}
+
+.price-unknown-toggle[aria-pressed="true"] {
+  color: var(--surface-bright);
+  background: var(--rust);
+}
+
+.price-unknown-toggle[aria-pressed="true"]:hover {
+  background: var(--rust-deep);
 }
 
 .field-readonly {

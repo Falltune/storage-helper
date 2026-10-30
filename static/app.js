@@ -471,25 +471,33 @@
         h(recordId || "") +
         "</span> 不在现有档案中。" +
         (isWarehouse
-          ? "请检查链接，或从目录重新进入。"
+          ? "这个编号还没有分配。你可以新建一个仓库，系统会自动分配可用编号。"
           : "请检查链接，也可以直接补录一件物品；若分类 " +
             h(categoryCode) +
             " 尚未建立，会先引导你创建分类。") +
         "</p>" +
         '<div class="state-actions">' +
         (isWarehouse
-          ? '<a class="button button-primary" href="/warehouses" data-link>查看所有仓库</a>'
+          ? '<button class="button button-primary" type="button" id="create-missing-warehouse">' +
+            icon("plus") +
+            "新建仓库</button>" +
+            '<a class="button button-secondary" href="/warehouses" data-link>查看所有仓库</a>'
           : '<button class="button button-primary" type="button" id="add-missing-item">' +
             icon("plus") +
             "添加物品</button>" +
             '<a class="button button-secondary" href="/items" data-link>查看物品目录</a>') +
-        (isWarehouse
-          ? '<a class="button button-secondary" href="/" data-link>回到总览</a>'
-          : '<a class="button button-quiet" href="/" data-link>回到总览</a>') +
+        '<a class="button button-quiet" href="/" data-link>回到总览</a>' +
         "</div>" +
         "</section>"
     );
-    if (!isWarehouse) {
+    if (isWarehouse) {
+      const createButton = document.getElementById("create-missing-warehouse");
+      if (createButton) {
+        createButton.addEventListener("click", function () {
+          openWarehouseCreateModal();
+        });
+      }
+    } else {
       const addButton = document.getElementById("add-missing-item");
       if (addButton) {
         addButton.addEventListener("click", function () {
@@ -2093,6 +2101,53 @@
     );
   }
 
+  function priceFieldMarkup(options) {
+    const opts = options || {};
+    const inputId = opts.id || uid("price");
+    const value = opts.value == null ? "" : String(opts.value);
+    // Deliberately no inputmode: iOS numeric/decimal keypads have no minus key,
+    // while the default number keyboard can type the -1 unknown-price marker.
+    return (
+      '<div class="field"><div class="field-label-row">' +
+      '<label class="field-label" for="' +
+      h(inputId) +
+      '">入手价 <em>必填</em></label></div>' +
+      '<div class="input-prefix">' +
+      "<span>¥</span>" +
+      '<input id="' +
+      h(inputId) +
+      '" class="input" type="number" name="price" min="-1" step="0.01" placeholder="0.00 或 -1" value="' +
+      h(value) +
+      '" required>' +
+      '<button class="price-unknown-toggle" type="button" data-price-unknown aria-pressed="false" title="价格未知，自动填入 -1">价格未知</button>' +
+      "</div>" +
+      '<span class="field-hint">价格未知时填 -1，也可点「价格未知」自动填入。</span></div>'
+    );
+  }
+
+  function bindPriceField(form) {
+    if (!form) return;
+    const input = form.querySelector('input[name="price"]');
+    const toggle = form.querySelector("[data-price-unknown]");
+    if (!input || !toggle) return;
+
+    const isUnknown = function () {
+      return input.value.trim() !== "" && Number(input.value) === -1;
+    };
+    const syncToggle = function () {
+      toggle.setAttribute("aria-pressed", isUnknown() ? "true" : "false");
+    };
+
+    toggle.addEventListener("click", function (event) {
+      event.preventDefault();
+      input.value = isUnknown() ? "" : "-1";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      syncToggle();
+    });
+    input.addEventListener("input", syncToggle);
+    syncToggle();
+  }
+
   function clearFormError(form) {
     const box = form.querySelector(".form-error");
     if (box) {
@@ -2494,9 +2549,8 @@
       '" value="' +
       todayISO() +
       '" required></div></label>' +
-      '<label class="field"><span class="field-label">入手价 <em>必填</em></span>' +
-      '<div class="input-prefix"><span>¥</span><input class="input" type="number" name="price" min="-1" step="0.01" inputmode="decimal" placeholder="0.00 或 -1" required></div>' +
-      '<span class="field-hint">价格未知时填 -1。</span></label></div>' +
+      priceFieldMarkup() +
+      "</div>" +
       '<div class="number-preview"><span>系统将分配编号</span><strong class="mono" id="' +
       previewId +
       '">选择分类后预览</strong></div>' +
@@ -2523,6 +2577,7 @@
     });
 
     const form = modal.dialog.querySelector("form");
+    bindPriceField(form);
     const categorySelect = modal.dialog.querySelector('[name="category_code"]');
     const warehouseSelect = modal.dialog.querySelector('[name="warehouse_id"]');
     const preview = modal.dialog.querySelector("#" + previewId);
@@ -2851,9 +2906,8 @@
       '" value="' +
       todayISO() +
       '" required></div></label>' +
-      '<label class="field"><span class="field-label">入手价 <em>必填</em></span>' +
-      '<div class="input-prefix"><span>¥</span><input class="input" type="number" name="price" min="-1" step="0.01" inputmode="decimal" placeholder="0.00 或 -1" required></div>' +
-      '<span class="field-hint">价格未知时填 -1。</span></label></div>' +
+      priceFieldMarkup() +
+      "</div>" +
       '<div class="field-readonly"><span>当前位置 / 自动写入</span><strong' +
       (warehouseLabel(warehouse) ? "" : ' class="mono"') +
       ">" +
@@ -2930,6 +2984,7 @@
     });
 
     const newForm = modal.dialog.querySelector("#inbound-new-form");
+    bindPriceField(newForm);
     const existingForm = modal.dialog.querySelector("#inbound-existing-form");
     const categorySelect = modal.dialog.querySelector('[name="category_code"]');
     const preview = modal.dialog.querySelector("#new-item-preview");
@@ -3091,6 +3146,7 @@
 
   function openItemEditModal(item) {
     const nameId = uid("edit-name");
+    const priceId = uid("edit-price");
     const modal = openModal({
       eyebrow: "EDIT RECORD",
       title: "编辑物品资料",
@@ -3118,11 +3174,14 @@
         '" value="' +
         h(item.acquired_on) +
         '" required></div></label>' +
-        '<label class="field"><span class="field-label">入手价 <em>必填</em></span>' +
-        '<div class="input-prefix"><span>¥</span><input class="input" type="number" name="price" min="-1" step="0.01" inputmode="decimal" placeholder="0.00 或 -1" value="' +
-        h(Number(item.price_cents) === -1 ? "-1" : (item.price_cents / 100).toFixed(2)) +
-        '" required></div>' +
-        '<span class="field-hint">价格未知时填 -1。</span></label></div>' +
+        priceFieldMarkup({
+          id: priceId,
+          value:
+            Number(item.price_cents) === -1
+              ? "-1"
+              : (item.price_cents / 100).toFixed(2),
+        }) +
+        "</div>" +
         '<div class="field-readonly"><span>当前位置 / 只读</span><strong' +
         (item.warehouse && warehouseLabel(item.warehouse) ? "" : ' class="mono"') +
         ">" +
@@ -3135,6 +3194,7 @@
         "</form>",
     });
     const form = modal.dialog.querySelector("form");
+    bindPriceField(form);
     bindForm(form, async function () {
       const formData = new FormData(form);
       const data = await api("/api/items/" + encodeURIComponent(item.id), {

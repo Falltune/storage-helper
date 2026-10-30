@@ -454,6 +454,9 @@
 
   function renderRecordNotFound(active, kind, recordId) {
     const isWarehouse = kind === "warehouse";
+    const categoryCode = isWarehouse
+      ? ""
+      : String(recordId || "").slice(0, 3).toUpperCase();
     renderShell(
       active,
       '<section class="state-page">' +
@@ -466,15 +469,34 @@
         "</h1>" +
         '<p class="state-copy">编号 <span class="mono">' +
         h(recordId || "") +
-        "</span> 不在现有档案中。请检查链接，或从目录重新进入。</p>" +
+        "</span> 不在现有档案中。" +
+        (isWarehouse
+          ? "请检查链接，或从目录重新进入。"
+          : "请检查链接，也可以直接补录一件物品；若分类 " +
+            h(categoryCode) +
+            " 尚未建立，会先引导你创建分类。") +
+        "</p>" +
         '<div class="state-actions">' +
         (isWarehouse
           ? '<a class="button button-primary" href="/warehouses" data-link>查看所有仓库</a>'
-          : '<a class="button button-primary" href="/items" data-link>查看物品目录</a>') +
-        '<a class="button button-secondary" href="/" data-link>回到总览</a>' +
+          : '<button class="button button-primary" type="button" id="add-missing-item">' +
+            icon("plus") +
+            "添加物品</button>" +
+            '<a class="button button-secondary" href="/items" data-link>查看物品目录</a>') +
+        (isWarehouse
+          ? '<a class="button button-secondary" href="/" data-link>回到总览</a>'
+          : '<a class="button button-quiet" href="/" data-link>回到总览</a>') +
         "</div>" +
         "</section>"
     );
+    if (!isWarehouse) {
+      const addButton = document.getElementById("add-missing-item");
+      if (addButton) {
+        addButton.addEventListener("click", function () {
+          openItemCreateModal({ categoryCode: categoryCode });
+        });
+      }
+    }
   }
 
   function renderRouteNotFound(route) {
@@ -985,7 +1007,11 @@
       "<h1>物品目录</h1>" +
       '<p class="intro-copy">每一件入档物品，都有自己的编号与位置；不再常用的记录可以归档收起。</p>' +
       "</div>" +
-      '<div class="page-actions"><a class="button button-primary" href="/warehouses" data-link>' +
+      '<div class="page-actions">' +
+      '<button class="button button-primary" type="button" id="add-item">' +
+      icon("plus") +
+      "添加物品</button>" +
+      '<a class="button button-secondary" href="/warehouses" data-link>' +
       icon("inbound") +
       "入库</a></div>" +
       "</section>";
@@ -1036,6 +1062,13 @@
     let statusFilter = "all";
     let query = "";
     let categoryFilter = initialCategory;
+
+    const addItemButton = document.getElementById("add-item");
+    if (addItemButton) {
+      addItemButton.addEventListener("click", function () {
+        openItemCreateModal({ categoryCode: categoryFilter });
+      });
+    }
 
     function matchesArchiveFilter(item) {
       if (statusFilter === "archived") return Boolean(item.archived);
@@ -1108,8 +1141,10 @@
           '<span class="illustration-dot"></span>' +
           "</div>" +
           "<h2>档案还是空的</h2>" +
-          "<p>物品从仓库入库，系统会自动为它生成唯一编号。</p>" +
-          '<a class="button button-primary" href="/warehouses" data-link>前往仓库</a>' +
+          "<p>添加第一件物品，系统会自动为它生成唯一编号并写入存放位置。</p>" +
+          '<button class="button button-primary" type="button" data-add-item>' +
+          icon("plus") +
+          "添加物品</button>" +
           "</div>";
       } else if (!visible.length) {
         const archivedEmpty =
@@ -1172,6 +1207,11 @@
       });
     });
     grid.addEventListener("click", async function (event) {
+      const addButton = event.target.closest("[data-add-item]");
+      if (addButton) {
+        openItemCreateModal({ categoryCode: categoryFilter });
+        return;
+      }
       const archiveButton = event.target.closest("[data-item-archive]");
       const unarchiveButton = event.target.closest("[data-item-unarchive]");
       const button = archiveButton || unarchiveButton;
@@ -1324,7 +1364,9 @@
       document.getElementById("create-warehouse-empty"),
     ].filter(Boolean);
     openButtons.forEach(function (button) {
-      button.addEventListener("click", openWarehouseCreateModal);
+      button.addEventListener("click", function () {
+        openWarehouseCreateModal();
+      });
     });
   }
 
@@ -2135,7 +2177,8 @@
     });
   }
 
-  function openWarehouseCreateModal() {
+  function openWarehouseCreateModal(options) {
+    const opts = options || {};
     const labelField = "warehouse-label";
     const modal = openModal({
       eyebrow: "NEW WAREHOUSE",
@@ -2164,29 +2207,46 @@
       });
       modal.close();
       toast("仓库 " + warehouseTitle(data.warehouse) + " 已建立", "success");
-      navigate(warehousePath(data.warehouse.id));
+      if (opts.onCreated) {
+        opts.onCreated(data.warehouse);
+      } else {
+        navigate(warehousePath(data.warehouse.id));
+      }
     });
   }
 
   function openCategoryModal(options) {
     const opts = options || {};
     const codeField = "category-code";
+    const presetCode = String(opts.code || "").trim().toUpperCase();
+    const hasPresetCode = /^[A-Z]{3}$/.test(presetCode);
+    const lockCode = Boolean(opts.lockCode && hasPresetCode);
     const modal = openModal({
       eyebrow: "NEW CATEGORY",
-      title: "新建分类",
-      description: "三位英文字母会成为该大类所有物品的编号开头。",
+      title: hasPresetCode ? "新建分类 " + presetCode : "新建分类",
+      description: lockCode
+        ? "分类代号来自物品地址；先建立这个分类，才能继续添加物品。"
+        : "三位英文字母会成为该大类所有物品的编号开头。",
       size: "sm",
-      initialFocus: "#" + codeField,
+      initialFocus: lockCode ? "#category-name" : "#" + codeField,
       body:
         '<form class="modal-form" novalidate>' +
         formErrorMarkup() +
         '<div class="field-grid"><label class="field"><span class="field-label">分类代号 <em>必填</em></span>' +
         '<input id="' +
         codeField +
-        '" class="input input-code" type="text" name="code" maxlength="3" pattern="[A-Za-z]{3}" placeholder="ELE" required autocomplete="off" spellcheck="false" autofocus>' +
-        '<span class="field-hint">3 位英文字母，例如 ELE、BOO。STR 已被系统保留。</span></label>' +
+        '" class="input input-code" type="text" name="code" maxlength="3" pattern="[A-Za-z]{3}" placeholder="ELE" value="' +
+        h(hasPresetCode ? presetCode : "") +
+        '" required autocomplete="off" spellcheck="false"' +
+        (lockCode ? ' readonly aria-readonly="true"' : "") +
+        ">" +
+        '<span class="field-hint">' +
+        (lockCode
+          ? "从物品编号识别出的分类代号，不能在这里修改。"
+          : "3 位英文字母，例如 ELE、BOO。STR 已被系统保留。") +
+        "</span></label>" +
         '<label class="field"><span class="field-label">显示名称 <em>可选</em></span>' +
-        '<input class="input" type="text" name="name" maxlength="40" placeholder="例如：电子设备"></label></div>' +
+        '<input id="category-name" class="input" type="text" name="name" maxlength="40" placeholder="例如：电子设备"></label></div>' +
         '<div class="callout callout-quiet">' +
         icon("info") +
         "<p>分类下没有物品时，可以在分类页删除它。已有物品的分类会保留。</p></div>" +
@@ -2195,7 +2255,7 @@
     });
     const form = modal.dialog.querySelector("form");
     const codeInput = form.querySelector('[name="code"]');
-    if (codeInput) {
+    if (codeInput && !lockCode) {
       codeInput.addEventListener("input", function () {
         const start = codeInput.selectionStart;
         const cleaned = codeInput.value
@@ -2289,6 +2349,362 @@
         );
       })
       .join("");
+  }
+
+  function warehouseOptionMarkup(warehouses, selectedId) {
+    if (!warehouses.length) {
+      return '<option value="" disabled selected>还没有可用仓库，请先新建</option>';
+    }
+    return warehouses
+      .map(function (warehouse) {
+        const label = warehouseLabel(warehouse);
+        return (
+          '<option value="' +
+          h(warehouse.id) +
+          '"' +
+          (warehouse.id === selectedId ? " selected" : "") +
+          ">" +
+          h(label ? label + " · " + warehouse.id : warehouse.id) +
+          "</option>"
+        );
+      })
+      .join("");
+  }
+
+  async function openItemCreateModal(options) {
+    const opts = options || {};
+    const requiredCode = String(opts.categoryCode || "").trim().toUpperCase();
+    const hasRequiredCode = /^[A-Z]{3}$/.test(requiredCode);
+    let categories = [];
+    let warehouses = [];
+    try {
+      const result = await Promise.all([
+        api("/api/categories"),
+        api("/api/warehouses"),
+      ]);
+      categories = result[0].categories || [];
+      warehouses = result[1].warehouses || [];
+    } catch (error) {
+      toast(error.message || "未能读取分类与仓库信息", "error");
+      return;
+    }
+
+    const categorySelectId = uid("item-create-category");
+    const warehouseSelectId = uid("item-create-warehouse");
+    const nameId = uid("item-create-name");
+    const alertsId = uid("item-create-alerts");
+    const previewId = uid("item-create-preview");
+
+    function hasRequiredCategory() {
+      return (
+        !hasRequiredCode ||
+        categories.some(function (category) {
+          return category.code === requiredCode;
+        })
+      );
+    }
+
+    function categoryIsBlocked() {
+      return hasRequiredCode && !hasRequiredCategory();
+    }
+
+    function alertsMarkup() {
+      const blocks = [];
+      if (categoryIsBlocked()) {
+        blocks.push(
+          '<div class="callout callout-attention">' +
+            icon("tag") +
+            "<div><strong>分类 " +
+            h(requiredCode) +
+            " 尚未建立</strong><p>添加物品前，需要先添加分类 " +
+            h(requiredCode) +
+            "。分类代号会成为物品编号的前三位。</p></div>" +
+            '<button class="inline-create-category" type="button" data-create-category>' +
+            icon("plus") +
+            "添加分类 " +
+            h(requiredCode) +
+            "</button></div>"
+        );
+      } else if (!categories.length) {
+        blocks.push(
+          '<div class="callout callout-attention">' +
+            icon("tag") +
+            "<div><strong>先添加一个分类</strong><p>分类会决定物品编号的前三位，添加物品前需要先建立分类。</p></div>" +
+            '<button class="inline-create-category" type="button" data-create-category>' +
+            icon("plus") +
+            "添加分类</button></div>"
+        );
+      }
+      if (!warehouses.length) {
+        blocks.push(
+          '<div class="callout callout-attention">' +
+            icon("layers") +
+            "<div><strong>还没有可用的仓库</strong><p>物品需要直接入库到一个仓库。可以先新建仓库，或到仓库页取消归档后再试。</p></div>" +
+            '<button class="inline-create-category" type="button" data-create-warehouse>' +
+            icon("plus") +
+            "新建仓库</button></div>"
+        );
+      }
+      return blocks.join("");
+    }
+
+    const body =
+      '<form class="modal-form item-create-form" novalidate>' +
+      formErrorMarkup() +
+      '<div id="' +
+      alertsId +
+      '">' +
+      alertsMarkup() +
+      "</div>" +
+      '<div class="field-grid">' +
+      '<div class="field"><div class="field-label-row">' +
+      '<label class="field-label" for="' +
+      categorySelectId +
+      '">分类 <em>必填</em></label>' +
+      '<button class="inline-text-button" type="button" data-create-category>新建分类 ' +
+      icon("plus") +
+      "</button></div>" +
+      '<select id="' +
+      categorySelectId +
+      '" class="input select-input" name="category_code" required>' +
+      categoryOptionMarkup(categories, "") +
+      "</select></div>" +
+      '<div class="field"><div class="field-label-row">' +
+      '<label class="field-label" for="' +
+      warehouseSelectId +
+      '">存放仓库 <em>必填</em></label>' +
+      '<button class="inline-text-button" type="button" data-create-warehouse>新建仓库 ' +
+      icon("plus") +
+      "</button></div>" +
+      '<select id="' +
+      warehouseSelectId +
+      '" class="input select-input" name="warehouse_id" required>' +
+      warehouseOptionMarkup(warehouses, "") +
+      "</select></div>" +
+      "</div>" +
+      '<label class="field"><span class="field-label">物品名称 <em>必填</em></span>' +
+      '<input id="' +
+      nameId +
+      '" class="input" type="text" name="name" maxlength="100" placeholder="例如：米白色羊毛围巾" required autofocus></label>' +
+      '<div class="field-grid"><label class="field"><span class="field-label">入手时间 <em>必填</em></span>' +
+      '<div class="input-with-icon">' +
+      icon("calendar") +
+      '<input class="input" type="date" name="acquired_on" max="' +
+      todayISO() +
+      '" value="' +
+      todayISO() +
+      '" required></div></label>' +
+      '<label class="field"><span class="field-label">入手价 <em>必填</em></span>' +
+      '<div class="input-prefix"><span>¥</span><input class="input" type="number" name="price" min="-1" step="0.01" inputmode="decimal" placeholder="0.00 或 -1" required></div>' +
+      '<span class="field-hint">价格未知时填 -1。</span></label></div>' +
+      '<div class="number-preview"><span>系统将分配编号</span><strong class="mono" id="' +
+      previewId +
+      '">选择分类后预览</strong></div>' +
+      '<div class="modal-actions"><button class="button button-quiet" type="button" data-modal-close>取消</button>' +
+      '<button class="button button-primary" type="submit">' +
+      icon("plus") +
+      "添加物品</button></div>" +
+      "</form>";
+
+    let focusSelector = "#" + categorySelectId;
+    if (categoryIsBlocked() || !categories.length) {
+      focusSelector = "#" + alertsId + " [data-create-category]";
+    } else if (!warehouses.length) {
+      focusSelector = "#" + alertsId + " [data-create-warehouse]";
+    }
+
+    const modal = openModal({
+      eyebrow: "NEW ITEM",
+      title: "添加物品",
+      description: "选择分类与存放仓库，系统会分配新的物品编号并直接入库。",
+      size: "lg",
+      initialFocus: focusSelector,
+      body: body,
+    });
+
+    const form = modal.dialog.querySelector("form");
+    const categorySelect = modal.dialog.querySelector('[name="category_code"]');
+    const warehouseSelect = modal.dialog.querySelector('[name="warehouse_id"]');
+    const preview = modal.dialog.querySelector("#" + previewId);
+    const alerts = modal.dialog.querySelector("#" + alertsId);
+    const submitButton = form.querySelector('[type="submit"]');
+
+    function updatePreview() {
+      if (!preview) return;
+      const selected = categories.find(function (category) {
+        return category.code === (categorySelect ? categorySelect.value : "");
+      });
+      if (selected) {
+        preview.textContent = selected.next_id
+          ? selected.next_id
+          : "该分类编号已用尽";
+      } else if (categoryIsBlocked()) {
+        preview.textContent = "请先建立分类 " + requiredCode;
+      } else {
+        preview.textContent = "选择分类后预览";
+      }
+    }
+
+    function updateSubmitState() {
+      if (!submitButton) return;
+      submitButton.disabled =
+        !categories.length || !warehouses.length || categoryIsBlocked();
+    }
+
+    function updateCategorySelect(preferredCode) {
+      if (!categorySelect) return;
+      if (categoryIsBlocked()) {
+        categorySelect.innerHTML =
+          '<option value="" disabled selected>分类 ' +
+          h(requiredCode) +
+          " 尚未建立</option>";
+        categorySelect.disabled = true;
+      } else if (!categories.length) {
+        categorySelect.innerHTML = categoryOptionMarkup(categories, "");
+        categorySelect.disabled = true;
+      } else {
+        let selected =
+          preferredCode ||
+          (hasRequiredCode ? requiredCode : "") ||
+          categorySelect.value ||
+          "";
+        const exists = categories.some(function (category) {
+          return category.code === selected;
+        });
+        if (!exists) {
+          selected = hasRequiredCode ? requiredCode : categories[0].code;
+        }
+        categorySelect.innerHTML = categoryOptionMarkup(categories, selected);
+        categorySelect.disabled = false;
+      }
+      updatePreview();
+      updateSubmitState();
+    }
+
+    function updateWarehouseSelect(preferredId) {
+      if (!warehouseSelect) return;
+      if (!warehouses.length) {
+        warehouseSelect.innerHTML = warehouseOptionMarkup(warehouses, "");
+        warehouseSelect.disabled = true;
+        updateSubmitState();
+        return;
+      }
+      let selected = preferredId || warehouseSelect.value || "";
+      const exists = warehouses.some(function (warehouse) {
+        return warehouse.id === selected;
+      });
+      if (!exists) selected = warehouses[0].id;
+      warehouseSelect.innerHTML = warehouseOptionMarkup(warehouses, selected);
+      warehouseSelect.disabled = false;
+      updateSubmitState();
+    }
+
+    function updateAlerts() {
+      if (!alerts) return;
+      alerts.innerHTML = alertsMarkup();
+    }
+
+    function focusNextRequirement() {
+      if (categoryIsBlocked() || !categories.length) {
+        const button = alerts && alerts.querySelector("[data-create-category]");
+        if (button) {
+          button.focus();
+          return;
+        }
+      }
+      if (!warehouses.length) {
+        const button = alerts && alerts.querySelector("[data-create-warehouse]");
+        if (button) {
+          button.focus();
+          return;
+        }
+      }
+      if (categorySelect && !categorySelect.disabled) categorySelect.focus();
+    }
+
+    updateCategorySelect("");
+    updateWarehouseSelect("");
+    if (categorySelect) {
+      categorySelect.addEventListener("change", updatePreview);
+    }
+
+    form.addEventListener("click", function (event) {
+      if (event.target.closest("[data-create-category]")) {
+        event.preventDefault();
+        const locking = categoryIsBlocked();
+        openCategoryModal({
+          code: locking ? requiredCode : "",
+          lockCode: locking,
+          onCreated: function (category) {
+            const index = categories.findIndex(function (candidate) {
+              return candidate.code === category.code;
+            });
+            if (index === -1) {
+              categories.push(category);
+            } else {
+              categories[index] = category;
+            }
+            updateAlerts();
+            updateCategorySelect(category.code);
+            focusNextRequirement();
+          },
+        });
+        return;
+      }
+      if (event.target.closest("[data-create-warehouse]")) {
+        event.preventDefault();
+        openWarehouseCreateModal({
+          onCreated: function (warehouse) {
+            const exists = warehouses.some(function (candidate) {
+              return candidate.id === warehouse.id;
+            });
+            if (!exists) warehouses.push(warehouse);
+            updateAlerts();
+            updateWarehouseSelect(warehouse.id);
+            focusNextRequirement();
+          },
+        });
+      }
+    });
+
+    bindForm(form, async function () {
+      if (categoryIsBlocked()) {
+        throw new ApiError(
+          "请先添加分类 " + requiredCode + "，再添加物品。"
+        );
+      }
+      if (!categories.length) {
+        throw new ApiError("请先添加一个分类，再添加物品。");
+      }
+      if (!warehouses.length) {
+        throw new ApiError("请先新建一个仓库，再添加物品。");
+      }
+      const formData = new FormData(form);
+      const data = await api("/api/items", {
+        method: "POST",
+        body: {
+          category_code: String(formData.get("category_code") || ""),
+          name: String(formData.get("name") || ""),
+          acquired_on: String(formData.get("acquired_on") || ""),
+          price: String(formData.get("price") || ""),
+          warehouse_id: String(formData.get("warehouse_id") || ""),
+        },
+      });
+      modal.close();
+      toast(data.item.id + " 已添加", "success");
+      if (opts.onCreated) {
+        opts.onCreated(data.item);
+      } else if (parseRoute(window.location.pathname).type === "items") {
+        const params = new URLSearchParams(window.location.search);
+        const filteredCategory = String(params.get("category") || "").toUpperCase();
+        if (filteredCategory && filteredCategory !== data.item.category_code) {
+          window.history.replaceState({}, "", "/items");
+        }
+        refreshCurrentPage({ scroll: false });
+      } else {
+        navigate(itemPath(data.item.id));
+      }
+    });
   }
 
   async function openInboundModal(warehouse) {
